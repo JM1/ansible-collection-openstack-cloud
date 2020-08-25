@@ -290,7 +290,7 @@ def _needs_update(cloud, module, router, network, internal_subnet_ids, internal_
     return False
 
 
-def _system_state_change(cloud, module, router, network, internal_ids, internal_portids, filters=None):
+def _system_state_change(cloud, module, router, network, internal_subnet_ids, internal_port_ids, filters=None):
     """Check if the system state would be changed."""
     state = module.params['state']
     if state == 'absent' and router:
@@ -298,7 +298,7 @@ def _system_state_change(cloud, module, router, network, internal_ids, internal_
     if state == 'present':
         if not router:
             return True
-        return _needs_update(cloud, module, router, network, internal_ids, internal_portids, filters)
+        return _needs_update(cloud, module, router, network, internal_subnet_ids, internal_port_ids, filters)
     return False
 
 
@@ -420,10 +420,10 @@ def main():
 
         # Validate and cache the subnet IDs so we can avoid duplicate checks
         # and expensive API calls.
-        external_ids, subnet_internal_ids, internal_portids = _validate_subnets(module, cloud, filters)
+        external_subnet_ids, internal_subnet_ids, internal_port_ids = _validate_subnets(module, cloud, filters)
         if module.check_mode:
             module.exit_json(
-                changed=_system_state_change(cloud, module, router, net, subnet_internal_ids, internal_portids, filters)
+                changed=_system_state_change(cloud, module, router, net, internal_subnet_ids, internal_port_ids, filters)
             )
 
         if state == 'present':
@@ -434,15 +434,15 @@ def main():
                 if project_id:
                     kwargs['project_id'] = project_id
                 router = cloud.create_router(**kwargs)
-                for int_s_id in subnet_internal_ids:
+                for int_s_id in internal_subnet_ids:
                     cloud.add_router_interface(router, subnet_id=int_s_id)
                 changed = True
                 # add interface by port id as well
-                for int_p_id in internal_portids:
+                for int_p_id in internal_port_ids:
                     cloud.add_router_interface(router, port_id=int_p_id)
                 changed = True
             else:
-                if _needs_update(cloud, module, router, net, subnet_internal_ids, internal_portids, filters):
+                if _needs_update(cloud, module, router, net, internal_subnet_ids, internal_port_ids, filters):
                     kwargs = _build_kwargs(cloud, module, router, net)
                     updated_router = cloud.update_router(**kwargs)
 
@@ -453,18 +453,18 @@ def main():
 
                     # On a router update, if any internal interfaces were supplied,
                     # just detach all existing internal interfaces and attach the new.
-                    if internal_portids or subnet_internal_ids:
+                    if internal_port_ids or internal_subnet_ids:
                         router = updated_router
                         ports = _router_internal_interfaces(cloud, router)
                         for port in ports:
                             cloud.remove_router_interface(router, port_id=port['id'])
-                    if internal_portids:
-                        external_ids, subnet_internal_ids, internal_portids = _validate_subnets(module, cloud, filters)
-                        for int_p_id in internal_portids:
+                    if internal_port_ids:
+                        external_subnet_ids, internal_subnet_ids, internal_port_ids = _validate_subnets(module, cloud, filters)
+                        for int_p_id in internal_port_ids:
                             cloud.add_router_interface(router, port_id=int_p_id)
                         changed = True
-                    if subnet_internal_ids:
-                        for s_id in subnet_internal_ids:
+                    if internal_subnet_ids:
+                        for s_id in internal_subnet_ids:
                             cloud.add_router_interface(router, subnet_id=s_id)
                         changed = True
 
