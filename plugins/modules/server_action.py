@@ -35,7 +35,7 @@ options:
         - Perform the given action. The lock and unlock actions always return
             changed as the servers API does not provide lock status.
         choices: [stop, start, pause, unpause, lock, unlock, suspend, resume,
-                rebuild]
+                rebuild, shelve, unshelve]
         type: str
         required: true
     image:
@@ -79,7 +79,9 @@ _action_map = {'stop': 'SHUTOFF',
                'unlock': 'ACTIVE',
                'suspend': 'SUSPENDED',
                'resume': 'ACTIVE',
-               'rebuild': 'ACTIVE'}
+               'rebuild': 'ACTIVE',
+               'shelve': 'SHELVED_OFFLOADED',
+               'unshelve': 'ACTIVE'}
 
 _admin_actions = ['pause', 'unpause', 'suspend', 'resume', 'lock', 'unlock']
 
@@ -92,7 +94,7 @@ class ServerActionModule(OpenStackModule):
         action=dict(required=True, type='str',
                     choices=['stop', 'start', 'pause', 'unpause',
                              'lock', 'unlock', 'suspend', 'resume',
-                             'rebuild']),
+                             'rebuild', 'shelve', 'unshelve']),
         image=dict(required=False, type='str'),
         admin_password=dict(required=False, type='str'),
     )
