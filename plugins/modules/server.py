@@ -694,7 +694,7 @@ class ServerModule(OpenStackModule):
         state = self.params['state']
         server = self.conn.get_server(self.params['name'])
         if server and state == 'present':
-            if server.status not in ('ACTIVE', 'SHUTOFF', 'PAUSED', 'SUSPENDED'):
+            if server.status not in ('ACTIVE', 'SHUTOFF', 'PAUSED', 'SUSPENDED', 'SHELVED', 'SHELVED_OFFLOADED'):
                 self.fail(
                     msg="The instance is available but not Active state: " + server.status)
             (ip_changed, server) = _check_ips(self, self.conn, server)
