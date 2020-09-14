@@ -19,7 +19,7 @@ options:
     default: false
   all_projects:
     description:
-    - Whether return the volumes in all projects
+    - Whether return the volumes in all projects. Requires openstacksdk>=0.19.
     type: bool
     default: false
   name:
@@ -116,25 +116,33 @@ EXAMPLES = '''
 '''
 
 from ansible_collections.openstack.cloud.plugins.module_utils.openstack import OpenStackModule
+from distutils.version import StrictVersion
 
 
 class VolumeInfoModule(OpenStackModule):
 
     argument_spec = dict(
-        details=dict(type='bool', default=False),
-        all_projects=dict(type='bool', default=False),
+        details=dict(type='bool', required=False),
+        all_projects=dict(type='bool', required=False, min_ver='0.19.0'),
         name=dict(type='str', required=False),
         status=dict(type='str', required=False),
     )
 
     def run(self):
-        result = self.conn.block_storage.volumes(
-            details=self.params['details'],
-            name=self.params['name'],
-            all_projects=self.params['all_projects'],
-            status=self.params['status'],
-        )
-        result = list(result)
+        kwargs = {}
+        for key in ['details', 'name', 'all_projects', 'status']:
+            if self.params[key] is not None:
+                kwargs[key] = self.params[key]
+
+        result = self.conn.block_storage.volumes(**kwargs)
+
+        if StrictVersion(self.sdk_version) >= StrictVersion('0.19.0'):
+            # Resource is a dict subclass since 0.19.0
+            # Ref.: https://github.com/openstack/openstacksdk/commit/2f973948473b52a6f1eb9e2eae5962d1df7a992f
+            result = list(result)
+        else:
+            result = [vol.to_dict() for vol in result]
+
         self.results.update({'volumes': result})
 
 
