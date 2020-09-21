@@ -199,7 +199,10 @@ def _needs_update(subnet, module, cloud, filters=None):
     no_gateway_ip = module.params['no_gateway_ip']
     dns = module.params['dns_nameservers']
     host_routes = module.params['host_routes']
-    curr_pool = dict(start=pool_start, end=pool_end)
+    if pool_start and pool_end:
+        curr_pool = dict(start=pool_start, end=pool_end)
+    else:
+        curr_pool = None
 
     if subnet['enable_dhcp'] != enable_dhcp:
         return True
@@ -207,7 +210,7 @@ def _needs_update(subnet, module, cloud, filters=None):
         return True
     if not subnet['allocation_pools'] and pool_start and pool_end:
         return True
-    if subnet['allocation_pools'] and curr_pool not in subnet['allocation_pools']:
+    if curr_pool and subnet['allocation_pools'] and curr_pool not in subnet['allocation_pools']:
         return True
     if gateway_ip and subnet['gateway_ip'] != gateway_ip:
         return True
@@ -346,16 +349,29 @@ def main():
                 changed = True
             else:
                 if _needs_update(subnet, module, cloud, filters):
-                    if subnet['allocation_pools'] and pool is not None:
-                        pool = pool + subnet['allocation_pools']
-                    cloud.update_subnet(subnet['id'],
-                                        subnet_name=subnet_name,
-                                        enable_dhcp=enable_dhcp,
-                                        gateway_ip=gateway_ip,
-                                        disable_gateway_ip=no_gateway_ip,
-                                        dns_nameservers=dns,
-                                        allocation_pools=pool,
-                                        host_routes=host_routes)
+                    # Only apply necessary changes to prevent errors like "Current gateway ip 192.168.0.1 already in use
+                    # by port efc64a9f-264e-4c1e-bdbb-0c4e97bc5a06. Unable to update."
+                    kwargs = dict()
+                    if subnet['name'] != subnet_name:
+                        kwargs['subnet_name'] = subnet_name
+
+                    if subnet['enable_dhcp'] != enable_dhcp:
+                        kwargs['enable_dhcp'] = enable_dhcp
+
+                    if subnet['gateway_ip'] != gateway_ip:
+                        kwargs['gateway_ip'] = gateway_ip
+
+                    if no_gateway_ip and subnet['gateway_ip']:
+                        kwargs['disable_gateway_ip'] = no_gateway_ip
+
+                    if dns and sorted(subnet['dns_nameservers']) != sorted(dns):
+                        kwargs['dns_nameservers'] = dns
+
+                    if subnet['allocation_pools'] and pool is not None and pool not in subnet['allocation_pools']:
+                        kwargs['allocation_pools'] = pool + subnet['allocation_pools']
+
+                    kwargs['host_routes'] = host_routes
+                    cloud.update_subnet(subnet['id'], **kwargs)
                     changed = True
                 else:
                     changed = False
