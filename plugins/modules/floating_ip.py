@@ -24,9 +24,8 @@ options:
      type: str
    floating_ip_address:
      description:
-        - A floating IP address to attach or to detach. Required only if I(state)
-          is absent. When I(state) is present can be used to specify a IP address
-          to attach.
+        - A floating IP address to attach or to detach. When I(state) is present can be used to specify a IP address
+          to attach. I(floating_ip_address) requires I(network) to be set.
      type: str
    reuse:
      description:
@@ -118,19 +117,57 @@ EXAMPLES = '''
      server: cattle001
 '''
 
-from ansible.module_utils.basic import AnsibleModule, remove_values
+from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.openstack.cloud.plugins.module_utils.openstack import (openstack_full_argument_spec,
                                                                                 openstack_module_kwargs,
                                                                                 openstack_cloud_from_module)
+import itertools
 
 
 def _get_floating_ip(cloud, floating_ip_address):
     f_ips = cloud.search_floating_ips(
         filters={'floating_ip_address': floating_ip_address})
+
     if not f_ips:
         return None
 
     return f_ips[0]
+
+
+def _list_floating_ips(server):
+    return itertools.chain.from_iterable([
+        (addr['addr'] for addr in server.addresses[net] if addr['OS-EXT-IPS:type'] == 'floating')
+        for net in server.addresses
+    ])
+
+
+def _match_floating_ip(cloud,
+                       server,
+                       floating_ip_address,
+                       network_id,
+                       fixed_address,
+                       nat_destination):
+
+    if floating_ip_address:
+        return _get_floating_ip(cloud, floating_ip_address)
+    elif not fixed_address and nat_destination:
+        nat_destination_name = cloud.get_network(nat_destination)['name']
+        return next(
+            (_get_floating_ip(cloud, addr['addr'])
+             for addr in server.addresses.get(nat_destination_name, [])
+             if addr['OS-EXT-IPS:type'] == 'floating'),
+            None)
+    else:
+        # not floating_ip_address and (fixed_address or not nat_destination)
+
+        # get any of the floating ips that matches fixed_address and/or network
+        f_ip_addrs = _list_floating_ips(server)
+        f_ips = [f_ip for f_ip in cloud.list_floating_ips() if f_ip['floating_ip_address'] in f_ip_addrs]
+        return next(
+            (f_ip for f_ip in f_ips
+             if ((fixed_address and f_ip.fixed_ip_address == fixed_address) or not fixed_address)
+             and ((network_id and f_ip.network == network_id) or not network_id)),
+            None)
 
 
 def main():
@@ -149,7 +186,16 @@ def main():
     )
 
     module_kwargs = openstack_module_kwargs()
-    module = AnsibleModule(argument_spec, **module_kwargs)
+
+    module = AnsibleModule(
+        argument_spec,
+        required_if=[
+            ['state', 'absent', ['floating_ip_address']]
+        ],
+        required_by=dict(
+            floating_ip_address=('network',)
+        ),
+        **module_kwargs)
 
     server_name_or_id = module.params['server']
     state = module.params['state']
@@ -163,85 +209,96 @@ def main():
     purge = module.params['purge']
 
     sdk, cloud = openstack_cloud_from_module(module)
-    try:
 
+    try:
         server = cloud.get_server(server_name_or_id)
-        if server is None:
+        if not server:
             module.fail_json(
                 msg="server {0} not found".format(server_name_or_id))
 
+        # Extract floating ips from server
+        f_ip_addrs = _list_floating_ips(server)
+
+        # Get details about requested floating ip
+        f_ip = _get_floating_ip(cloud, floating_ip_address) if floating_ip_address else None
+
+        if network:
+            network_id = cloud.get_network(name_or_id=network)["id"]
+        else:
+            network_id = None
+
         if state == 'present':
-            # If f_ip already assigned to server, check that it matches
-            # requirements.
-            public_ip = cloud.get_server_public_ip(server)
-            f_ip = _get_floating_ip(cloud, public_ip) if public_ip else public_ip
-            if f_ip:
-                if network:
-                    network_id = cloud.get_network(name_or_id=network)["id"]
-                else:
-                    network_id = None
-                # check if we have floating ip on given nat_destination network
-                if nat_destination:
-                    nat_floating_addrs = [
-                        addr for addr in server.addresses.get(
-                            cloud.get_network(nat_destination)['name'], [])
-                        if addr['addr'] == public_ip
-                        and addr['OS-EXT-IPS:type'] == 'floating'
-                    ]
+            if floating_ip_address and f_ip and floating_ip_address in f_ip_addrs:
+                # Floating ip address has been assigned to server
+                module.exit_json(changed=False, floating_ip=f_ip)
 
-                    if len(nat_floating_addrs) == 0:
-                        module.fail_json(msg="server {server} already has a "
-                                             "floating-ip on a different "
-                                             "nat-destination than '{nat_destination}'"
-                                         .format(server=server_name_or_id,
-                                                 nat_destination=nat_destination))
+            if f_ip and f_ip['attached'] and floating_ip_address not in f_ip_addrs:
+                # Requested floating ip has been attached to different server
+                module.fail_json(msg="floating-ip {floating_ip_address} already has been attached to different server"
+                                     .format(floating_ip_address=floating_ip_address))
 
-                if all([fixed_address, f_ip.fixed_ip_address == fixed_address,
-                        network, f_ip.network != network_id]):
-                    # Current state definitely conflicts with requirements
-                    module.fail_json(msg="server {server} already has a "
-                                         "floating-ip on requested "
-                                         "interface but it doesn't match "
-                                         "requested network {network}: {fip}"
-                                     .format(server=server_name_or_id,
-                                             network=network,
-                                             fip=remove_values(f_ip,
-                                                               module.no_log_values)))
-                if not network or f_ip.network == network_id:
-                    # Requirements are met
-                    module.exit_json(changed=False, floating_ip=f_ip)
+            if not floating_ip_address:
+                # No specific floating ip requested, i.e. if any floating ip is already assigned to server,
+                # check that it matches requirements.
 
-                # Requirements are vague enough to ignore existing f_ip and try
-                # to create a new f_ip to the server.
+                if not fixed_address and nat_destination:
+                    # Check if we have any floating ip on the given nat_destination network
+                    nat_destination_name = cloud.get_network(nat_destination)['name']
+                    for addr in server.addresses.get(nat_destination_name, []):
+                        if addr['OS-EXT-IPS:type'] == 'floating':
+                            # A floating ip address has been assigned to the requested nat_destination
+                            f_ip = _get_floating_ip(cloud, addr['addr'])
+                            module.exit_json(changed=False, floating_ip=f_ip)
+                # else fixed_address or not nat_destination, hence an
+                # analysis of all floating ips of server is required
+                f_ips = [f_ip for f_ip in cloud.list_floating_ips() if f_ip['floating_ip_address'] in f_ip_addrs]
+                for f_ip in f_ips:
+                    if network_id and f_ip.network != network_id:
+                        # requested network does not match network of floating ip
+                        continue
 
+                    if not fixed_address and not nat_destination:
+                        # any floating ip will fullfil these requirements
+                        module.exit_json(changed=False, floating_ip=f_ip)
+
+                    if fixed_address and f_ip.fixed_ip_address == fixed_address:
+                        # a floating ip address has been assigned that points to the requested fixed_address
+                        module.exit_json(changed=False, floating_ip=f_ip)
+
+            if floating_ip_address and not f_ip:
+                # openstacksdk's create_ip requires floating_ip_address and floating_network_id to be set
+                cloud.network.create_ip(floating_ip_address=floating_ip_address, floating_network_id=network_id)
+            # Else floating ip either does not exist or has not been attached yet
+
+            # Both floating_ip_address and network are mutually exclusive in add_ips_to_server, i.e.
+            # add_ips_to_server will ignore floating_ip_address if network is set
+            # Ref.: https://github.com/openstack/openstacksdk/blob/a6b0ece2821ea79330c4067100295f6bdcbe456e/openstack/cloud/_floating_ip.py#L987
             server = cloud.add_ips_to_server(
-                server=server, ips=floating_ip_address, ip_pool=network,
-                reuse=reuse, fixed_address=fixed_address, wait=wait,
+                server=server,
+                ips=floating_ip_address,
+                ip_pool=network if not floating_ip_address else None,
+                reuse=reuse,
+                fixed_address=fixed_address,
+                wait=wait,
                 timeout=timeout, nat_destination=nat_destination)
-            fip_address = cloud.get_server_public_ip(server)
-            # Update the floating IP status
-            f_ip = _get_floating_ip(cloud, fip_address)
+
+            # Update the floating ip status
+            f_ip = _match_floating_ip(cloud, server, floating_ip_address, network_id, fixed_address, nat_destination)
             module.exit_json(changed=True, floating_ip=f_ip)
 
         elif state == 'absent':
-            if floating_ip_address is None:
-                if not server_name_or_id:
-                    module.fail_json(msg="either server or floating_ip_address are required")
-                server = cloud.get_server(server_name_or_id)
-                floating_ip_address = cloud.get_server_public_ip(server)
-
-            f_ip = _get_floating_ip(cloud, floating_ip_address)
-
+            f_ip = _match_floating_ip(cloud, server, floating_ip_address, network_id, fixed_address, nat_destination)
             if not f_ip:
                 # Nothing to detach
                 module.exit_json(changed=False)
             changed = False
+
             if f_ip["fixed_ip_address"]:
-                cloud.detach_ip_from_server(
-                    server_id=server['id'], floating_ip_id=f_ip['id'])
+                cloud.detach_ip_from_server(server_id=server['id'], floating_ip_id=f_ip['id'])
                 # Update the floating IP status
                 f_ip = cloud.get_floating_ip(id=f_ip['id'])
                 changed = True
+
             if purge:
                 cloud.delete_floating_ip(f_ip['id'])
                 module.exit_json(changed=True)
